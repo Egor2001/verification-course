@@ -64,9 +64,9 @@ struct ReturnRequest {
 
 struct Customer {
 public:
-	DeliveryOrder CreateDeliveryOrder(const Cart& cart, const std::string address, std::chrono::year_month_day date, PaymentOption option) {
+	DeliveryOrder CreateDeliveryOrder(const Cart& cart, const std::string& address, std::chrono::year_month_day date, PaymentOption option) {
 		return DeliveryOrder{
-			.cust_id = id_, .book_ids = cart.GetAll(), .address = std::move(address), .date = date, .option = option,
+			.cust_id = id_, .book_ids = cart.GetAll(), .address = address, .date = date, .option = option,
 		};
 	}
 
@@ -188,6 +188,9 @@ public:
 		}
 		auto order = orders_[request.order_id];
 		auto status = statuses_[request.order_id];
+		if (order.cust_id != request.cust_id) {
+			return false;
+		}
 		if (status == DeliveryStatus::kCancelled ||
 			(request.option == ReturnOption::kCancel) != (status == DeliveryStatus::kWaiting)) {
 			return false;
@@ -195,8 +198,7 @@ public:
 
 		unsigned price = 0;
 		auto customer = GetCustomerAndPrice(order, &price);
-		if (request.option != ReturnOption::kCancel ||
-			(request.option == ReturnOption::kCancel && order.option == PaymentOption::kUponOrder)) {
+		if (request.option != ReturnOption::kCancel || order.option == PaymentOption::kUponOrder) {
 			if (customer) {
 				customer->IncBalance(price);
 				profit_ -= price;
