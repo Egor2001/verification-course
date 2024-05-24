@@ -10,48 +10,108 @@ struct Book {
 	unsigned int price;
 };
 
+bool operator==(const Book& lhs, const Book& rhs) {
+	return
+		std::tuple{lhs.name, lhs.author, lhs.category, lhs.label, lhs.year} ==
+		std::tuple{rhs.name, rhs.author, rhs.category, rhs.label, rhs.year};
+}
+
+bool operator!=(const Book& lhs, const Book& rhs) {
+	return !(lhs == rhs);
+}
+
 struct Cart {
 public:
 	bool AddBook(int book_id) {
-		return false;
+		if (std::find(book_ids.begin(), book_ids.end(), book_id) != book_ids.end()) {
+			return false;
+		}
+		book_ids.push_back(book_id);
+		return true;
 	}
+
+	const std::vector<int>& GetAll() const {
+		return book_ids;
+	}
+
+private:
+	std::vector<int> book_ids;
 };
+
+using OrderID = int;
 
 enum class PaymentOption {
 	kUponOrder, kOnReceipt,
 };
 
 struct DeliveryOrder {
+	int cust_id;
+	std::vector<int> book_ids;
+	std::string address;
+	std::chrono::year_month_day date;
+	PaymentOption option;
 };
 
 enum class ReturnOption {
 	kByCourier, kBySelf, kCancel,
 };
 
-struct ReturnOrder {
+struct ReturnRequest {
+	int cust_id;
+	OrderID order_id;
+	ReturnOption option;
 };
-
-using OrderID = int;
 
 struct Customer {
 public:
-	DeliveryOrder CreateDeliveryOrder(Cart cart, std::string address, std::chrono::year_month_day date, PaymentOption option) {
-		return {};
+	DeliveryOrder CreateDeliveryOrder(const Cart& cart, const std::string address, std::chrono::year_month_day date, PaymentOption option) {
+		return DeliveryOrder{
+			.cust_id = id_, .book_ids = cart.GetAll(), .address = std::move(address), .date = date, .option = option,
+		};
 	}
 
-	ReturnOrder CreateReturnRequest(OrderID id, ReturnOption option) {
-		return {};
+	ReturnRequest CreateReturnRequest(OrderID order_id, ReturnOption option) {
+		return ReturnRequest{
+			.cust_id = id_, .order_id = order_id, .option = option,
+		};
 	}
 
 	unsigned GetBalance() {
-		return 0;
+		return balance_;
 	}
+
+private:
+	friend class Store;
+
+	Customer(int id, unsigned balance): id_{id}, balance_{balance} {
+	}
+
+	static std::shared_ptr<Customer> Create(int id, unsigned balance) {
+		auto ptr = new Customer(id, balance);
+		return std::shared_ptr<Customer>(ptr);
+	}
+
+	bool TryDecBalance(unsigned value) {
+		if (balance_ < value) {
+			return false;
+		}
+		balance_ -= value;
+		return true;
+	}
+
+	void IncBalance(unsigned value) {
+		balance_ += value;
+	}
+
+private:
+	int id_;
+	unsigned balance_;
 };
 
 struct Store {
 public:
 	enum class DeliveryStatus {
-		kCreated, kWaiting, kDelivered, kCancelled,
+		kWaiting, kDelivered, kCancelled,
 	};
 
 public:
@@ -60,32 +120,122 @@ public:
 	}
 
 	std::shared_ptr<Customer> CreateCustomer(unsigned balance) {
-		return std::make_shared<Customer>();
+		auto customer = Customer::Create(next_customer_id_++, balance);
+		customers_.push_back(customer);
+		return customer;
 	}
 
 	int AddBook(const Book& book) {
-		return 0;
+		auto it = std::find(books_.begin(), books_.end(), book);
+		if (it != books_.end()) {
+			*it = book;
+			return static_cast<int>(std::distance(books_.begin(), it));
+		}
+		auto id = next_book_id_++;
+		books_.push_back(book);
+		return id;
 	}
 
 	std::optional<DeliveryStatus> CheckStatus(OrderID id) {
-		return std::nullopt;
+		if (id >= next_order_id_) {
+			return std::nullopt;
+		}
+		return statuses_[id];
 	}
 
 	std::optional<OrderID> RegisterDelivery(DeliveryOrder order) {
-		return std::nullopt;
+		unsigned price = 0;
+		auto customer = GetCustomerAndPrice(order, &price);
+		if (!customer) {
+			return std::nullopt;
+		}
+		if (order.option == PaymentOption::kUponOrder) {
+			if (!customer->TryDecBalance(price)) {
+				return std::nullopt;
+			}
+			profit_ += price;
+		}
+		auto id = next_order_id_++;
+		orders_.push_back(order);
+		statuses_.push_back(DeliveryStatus::kWaiting);
+		return id;
 	}
 
 	bool Deliver(OrderID id) {
-		return false;
+		if (id >= next_order_id_) {
+			return false;
+		}
+		auto order = orders_[id];
+		if (statuses_[id] != DeliveryStatus::kWaiting) {
+			return false;
+		}
+		unsigned price = 0;
+		auto customer = GetCustomerAndPrice(order, &price);
+		if (!customer || (order.option == PaymentOption::kOnReceipt && !customer->TryDecBalance(price))) {
+			statuses_[id] = DeliveryStatus::kCancelled;
+			return false;
+		}
+		if (order.option == PaymentOption::kOnReceipt) {
+			profit_ += price;
+		}
+		statuses_[id] = DeliveryStatus::kDelivered;
+		return true;
 	}
 
-	bool Return(ReturnOrder order) {
-		return false;
+	bool Return(ReturnRequest request) {
+		if (request.order_id >= next_order_id_) {
+			return false;
+		}
+		auto order = orders_[request.order_id];
+		auto status = statuses_[request.order_id];
+		if (status == DeliveryStatus::kCancelled ||
+			(request.option == ReturnOption::kCancel) != (status == DeliveryStatus::kWaiting)) {
+			return false;
+		}
+
+		unsigned price = 0;
+		auto customer = GetCustomerAndPrice(order, &price);
+		if (request.option != ReturnOption::kCancel ||
+			(request.option == ReturnOption::kCancel && order.option == PaymentOption::kUponOrder)) {
+			if (customer) {
+				customer->IncBalance(price);
+				profit_ -= price;
+			}
+		}
+		statuses_[request.order_id] = DeliveryStatus::kCancelled;
+		return true;
 	}
 
 	unsigned GetProfit() {
-		return 0;
+		return profit_;
 	}
+
+private:
+	std::shared_ptr<Customer> GetCustomerAndPrice(const DeliveryOrder& order, unsigned *price) {
+		auto cust_id = order.cust_id;
+		if (cust_id >= next_customer_id_) {
+			return nullptr;
+		}
+		auto customer = customers_[cust_id];
+		*price = 0;
+		for (auto book_id : order.book_ids) {
+			if (book_id >= next_book_id_) {
+				return nullptr;
+			}
+			*price += books_[book_id].price;
+		}
+		return customer;
+	}
+
+private:
+	int next_customer_id_ = 0;
+	int next_book_id_ = 0;
+	OrderID next_order_id_ = 0;
+	unsigned profit_ = 0;
+	std::vector<std::shared_ptr<Customer>> customers_;
+	std::vector<Book> books_;
+	std::vector<DeliveryOrder> orders_;
+	std::vector<DeliveryStatus> statuses_;
 };
 
 std::vector<Book> GetTestBooks() {
